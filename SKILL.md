@@ -8,7 +8,12 @@ description: Inspect and edit the user's existing local Inkscape drawing through
 Use the `inkler` executable beside this skill file. It uses system Python and needs
 access to the same desktop session bus as Inkscape. No remote server is involved.
 
-Connect once with the code the user supplies:
+If Inkler MCP tools are available, call `inkler_connect` with the user's code,
+then `inkler_inspect` and `inkler_preview`. The preview tool returns image content
+directly. Use `inkler_edit` for edits; it accepts the same JSON object described below.
+This route runs through the agent client's registered local MCP server.
+
+Otherwise, connect once through the CLI with the code the user supplies:
 
 ```bash
 /absolute/path/to/inkler connect INKLER-CODE
@@ -60,3 +65,6 @@ Use exactly the user's existing window. Do not launch, reload, or automatically
 save it. The prototype requires one Inkscape document open. If D-Bus is blocked
 by your execution environment, report that limitation; do not bypass it or launch
 a separate editor. A connection code does not grant permission for unrelated edits.
+If CLI D-Bus is blocked but no Inkler MCP tools are available, explain that the
+user must register the local stdio server with their agent client and reload its
+tools. Merely starting an MCP process in a shell does not register tools with you.

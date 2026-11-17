@@ -7,6 +7,7 @@ import sys
 from inkler_ipc import MAX_BYTES, read_bytes
 
 INSTRUCTIONS = """Inkler edits the user's EXISTING Inkscape window. Never launch or reload it.
+Call inkler_connect with the connection code supplied by the user before drawing operations.
 Use inkler_inspect and inkler_preview to identify objects and see the canvas before editing.
 Use IDs from inspection, not guesses. The user may select an object to disambiguate it.
 For 'turn this square into a cat', create SVG paths/groups and replace the square by ID.
@@ -31,6 +32,8 @@ def schema(properties=None, required=()):
 
 
 TOOLS = [
+    {"name": "inkler_connect", "description": "Connect this local agent to the user's existing Inkscape document using the code from Connect Agent. Does not alter the drawing.",
+     "inputSchema": schema({"code": {"type": "string", "minLength": 1}}, ("code",))},
     {"name": "inkler_status", "description": "Check connection to the existing Inkscape window.",
      "inputSchema": schema()},
     {"name": "inkler_inspect", "description": "Read selected IDs, document token, revision, SVG attributes and geometry. Optional ids filters the objects returned.",
@@ -50,7 +53,7 @@ TOOLS = [
                            ("document", "revision", "operations"))},
 ]
 for tool in TOOLS:
-    tool["annotations"] = {"readOnlyHint": tool["name"] != "inkler_edit",
+    tool["annotations"] = {"readOnlyHint": tool["name"] not in {"inkler_edit", "inkler_connect"},
                            "destructiveHint": tool["name"] == "inkler_edit",
                            "idempotentHint": tool["name"] != "inkler_edit", "openWorldHint": False}
 
@@ -64,8 +67,10 @@ def tool_call(name, arguments):
         raise ValueError("Unexpected tool arguments")
     if any(k not in arguments for k in definition["inputSchema"]["required"]):
         raise ValueError("Missing required tool argument")
-    from inkler_client import Desktop, request, preview
-    if name == "inkler_status":
+    from inkler_client import Desktop, request, preview, connect
+    if name == "inkler_connect":
+        data = connect(**arguments)
+    elif name == "inkler_status":
         data = Desktop().status()
     elif name == "inkler_inspect":
         data = request("inspect", **arguments)
@@ -108,7 +113,7 @@ def serve():
                 if protocol not in protocols:
                     protocol = "2025-11-25"
                 result = {"protocolVersion": protocol, "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "inkler", "version": "0.1.0"},
+                          "serverInfo": {"name": "inkler", "version": "0.2.0"},
                           "instructions": INSTRUCTIONS}
                 initialized = True
             elif method == "ping":

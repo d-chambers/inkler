@@ -244,6 +244,14 @@ class IPCTests(unittest.TestCase):
 
 
 class MCPTests(unittest.TestCase):
+    def test_connect_tool_calls_local_pairing(self):
+        from inkler_mcp import tool_call
+        with patch("inkler_client.connect", return_value={"connected": True}) as connect_mock:
+            result = tool_call("inkler_connect", {"code": "INKLER-TEST"})
+        connect_mock.assert_called_once_with(code="INKLER-TEST")
+        self.assertFalse(result["isError"])
+        self.assertTrue(json.loads(result["content"][0]["text"])["connected"])
+
     def test_panel_can_outlive_launcher_without_resource_warning(self):
         import warnings
         from inkler_pair import launch_panel
@@ -273,7 +281,7 @@ class MCPTests(unittest.TestCase):
         responses = [json.loads(l) for l in process.stdout.splitlines()]
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "inkler")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 4)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 5)
         self.assertTrue(responses[2]["result"]["isError"])
 
 

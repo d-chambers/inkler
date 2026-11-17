@@ -12,7 +12,8 @@ def instructions(code, root=None):
     root = Path(root or Path(__file__).resolve().parent)
     return (f"Use Inkler to collaborate with me in my existing Inkscape window. "
             f"First read the skill at {str(root / 'SKILL.md')!r}. "
-            f"Then run {shlex.quote(str(root / 'inkler'))} connect {code}. "
+            f"Connect using the inkler_connect MCP tool with code {code}, if that tool is available. "
+            f"Otherwise run {shlex.quote(str(root / 'inkler'))} connect {code}. "
             "Inspect my selection and preview the canvas before making the changes I request. "
             "This is a local-only connection; do not launch another Inkscape window or save my file.")
 

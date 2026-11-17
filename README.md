@@ -70,14 +70,29 @@ as Inkscape. It needs access to the session bus and the shared private Inkler ca
 A container, remote session or sandbox that blocks D-Bus cannot attach just because
 the executable is installed. The MCP client may need a restart after configuration.
 
-The four tools are `inkler_status`, `inkler_inspect`, `inkler_preview`, and
-`inkler_edit`. Previews are returned to MCP clients as image content. An agent with
+The five tools are `inkler_connect`, `inkler_status`, `inkler_inspect`,
+`inkler_preview`, and `inkler_edit`. Previews are returned as image content. An agent with
 shell access can use the CLI instead; it does not need MCP.
 
-If you created a connection code in the panel, run the copied `inkler connect CODE`
-command in the same OS account before invoking drawing tools over MCP. The current
+If you created a connection code in the panel, the agent calls `inkler_connect`
+with that code before invoking drawing tools. No shell connection command is
+needed when using MCP. The current
 prototype shares one local attachment among clients in that account; concurrent
 operations are serialized.
+
+For Codex, register the installed server once from your normal desktop terminal:
+
+```bash
+codex mcp add inkler -- "$HOME/.config/inkscape/extensions/inkler/inkler" mcp
+```
+
+Reload your agent client/tools after registration. The server process must have
+desktop session bus access. MCP and D-Bus are different layers:
+`agent → local stdio MCP server → D-Bus → Inkscape extension → existing document`.
+The server has an MCP initialize handshake, tool discovery, tool calls and image
+responses; it does not need a network listener or HTTP service. A restricted shell
+can fail to reach D-Bus even when an appropriately authorized client-launched MCP
+process can. That behavior depends on the client and its managed policy.
 
 Suggested first prompt:
 
