@@ -9,8 +9,14 @@ Use the `inkler` executable beside this skill file. It uses system Python and ne
 access to the same desktop session bus as Inkscape. No remote server is involved.
 
 If Inkler MCP tools are available, call `inkler_connect` with the user's code,
-then `inkler_inspect` and `inkler_preview`. The preview tool returns image content
-directly. Use `inkler_edit` for edits; it accepts the same JSON object described below.
+then `inkler_observe`. It returns selection, object IDs, geometry, revision and a PNG
+from the same snapshot. Optional `ids` filters object metadata, not the image;
+`width` and `area` (page or drawing) control rendering. Use `inkler_edit` for edits;
+it accepts the JSON object described below and returns a fresh observation by default.
+Use that observation's revision for the next edit. `observe: false` skips rendering
+but requires a new observation before another edit. If `edit_applied` is true and
+`observation_error` is present, the edit succeeded: observe again, never repeat it.
+Older servers can use `inkler_inspect` and `inkler_preview` separately.
 This route runs through the agent client's registered local MCP server.
 
 Otherwise, connect once through the CLI with the code the user supplies:
@@ -55,7 +61,7 @@ it does not inherit the replaced object's transform/style. Account for transform
 Fragments have no outer `<svg>` wrapper. Internal gradients, markers and
 `url(#id)` references work. Scripts, external resources and embedded images do not.
 
-After editing, inspect again and view a new preview to verify the result. A stale
+After editing, check the returned observation (or inspect and preview for CLI edits). A stale
 revision means the user changed the document: inspect again and reconsider your
 edit. Never automatically retry a timed-out edit; its outcome is unknown. Check
 the actual canvas before proceeding. If stalled, the user can restart Inkscape

@@ -70,7 +70,7 @@ as Inkscape. It needs access to the session bus and the shared private Inkler ca
 A container, remote session or sandbox that blocks D-Bus cannot attach just because
 the executable is installed. The MCP client may need a restart after configuration.
 
-The five tools are `inkler_connect`, `inkler_status`, `inkler_inspect`,
+The six tools are `inkler_connect`, `inkler_status`, `inkler_observe`, `inkler_inspect`,
 `inkler_preview`, and `inkler_edit`. Previews are returned as image content. An agent with
 shell access can use the CLI instead; it does not need MCP.
 
@@ -235,3 +235,24 @@ Built on Inkscape/inkex, lxml, PyGObject/Gio and Python supplied by the OS. See 
 and [MCP specification](https://modelcontextprotocol.io/specification/2025-11-25).
 
 MIT license; see LICENSE.
+
+### Faster MCP drawing workflow
+
+Call `inkler_observe` before editing: one snapshot supplies the PNG, selection,
+objects, geometry, document and revision. Optional `ids` filters metadata only;
+`area` chooses page or drawing, and `width` defaults to 1000 pixels.
+
+`inkler_edit` now returns a fresh observation and PNG by default. It accepts the
+same `ids`, `area`, and `width` options, plus `observe: false` to skip observation.
+Use the returned live revision for subsequent edits. The old extension-side hash
+was computed before Inkscape imported the edit, when SVG formatting can still
+change; it is no longer exposed as the MCP edit revision. Exact stale-revision
+checks remain in force. The observation can include intervening human edits.
+
+If rendering or observation fails after a confirmed edit, the result still says
+`edit_applied: true` and includes `observation_error`. **Do not repeat the edit**;
+call `inkler_observe` to see the current document. An edit timeout still has an
+unknown outcome and is never retried automatically.
+
+After upgrading, restart/reconnect the MCP client to load the new tools. These
+changes require no new Inkscape extension registration or document reload.

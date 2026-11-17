@@ -135,10 +135,10 @@ def request(operation, *, document=None, revision=None, operations=None, ids=Non
                            "If a dialog is blocking it, dismiss it. Otherwise restart Inkscape and reset Inkler")
 
 
-def preview(*, width=1200, area="page", desktop=None):
+def preview(*, width=1200, area="page", ids=None, desktop=None):
     if type(width) is not int or not 64 <= width <= 2048 or area not in {"page", "drawing"}:
         raise ValueError("Preview width must be 64–2048; area must be page or drawing")
-    data = request("snapshot", desktop=desktop)
+    data = request("snapshot", ids=ids, desktop=desktop)
     snapshot = Path(data.pop("snapshot"))
     png = snapshot.parent / "preview.png"
     # This is a headless render process, not another editor window. Never use a shell.

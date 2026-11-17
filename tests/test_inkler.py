@@ -202,6 +202,7 @@ class IPCTests(unittest.TestCase):
                 self.assertEqual(etree.fromstring(proc.stdout).xpath('//*[@id="square"]')[0].get("fill"), "blue")
             else:
                 self.assertEqual(result["data"]["selection"], ["square"])
+                self.assertEqual(proc.stdout, b"", "Observation must not return a drawing for Inkscape to re-import")
             if operation == "snapshot":
                 self.assertTrue((job / "snapshot.svg").is_file())
 
@@ -244,6 +245,64 @@ class IPCTests(unittest.TestCase):
 
 
 class MCPTests(unittest.TestCase):
+    def test_observe_uses_one_snapshot_with_matching_image(self):
+        from inkler_mcp import tool_call
+        with tempfile.TemporaryDirectory() as temp:
+            png = Path(temp) / "preview.png"
+            png.write_bytes(b"test-image")
+            png.chmod(0o600)
+            data = {"document": "doc", "revision": "live", "image": str(png), "selection": ["cat"]}
+            with patch("inkler_client.preview", return_value=data) as preview_mock, patch("inkler_client.request") as request_mock:
+                result = tool_call("inkler_observe", {"ids": ["cat"]})
+            preview_mock.assert_called_once_with(width=1000, area="page", ids=["cat"])
+            request_mock.assert_not_called()
+            self.assertEqual(json.loads(result["content"][0]["text"])["revision"], "live")
+            self.assertEqual(result["content"][1]["data"], "dGVzdC1pbWFnZQ==")
+
+    def test_edit_returns_live_revision_and_never_repeats_on_preview_failure(self):
+        from inkler_mcp import tool_call
+        args = {"document": "doc", "revision": "before", "operations": [{"op": "remove", "id": "cat"}]}
+        applied = {"document": "doc", "revision": "pre-import", "operations": 1, "note": "Applied"}
+        for failure in (None, RuntimeError("renderer failed"), "missing-image", "wrong-document"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temp:
+                png = Path(temp) / "preview.png"
+                if failure != "missing-image":
+                    png.write_bytes(b"png")
+                    png.chmod(0o600)
+                observed = {"document": "other" if failure == "wrong-document" else "doc",
+                            "revision": "live", "image": str(png)}
+                with patch("inkler_client.request", return_value=applied) as request_mock, patch(
+                        "inkler_client.preview", return_value=observed,
+                        side_effect=failure if isinstance(failure, Exception) else None):
+                    result = tool_call("inkler_edit", args)
+                request_mock.assert_called_once_with("edit", **args)
+                self.assertFalse(result["isError"])
+                data = json.loads(result["content"][0]["text"])
+                self.assertTrue(data["edit_applied"])
+                if failure is None:
+                    self.assertEqual(data["revision"], "live")
+                    self.assertEqual(result["content"][1]["type"], "image")
+                else:
+                    self.assertIn("observation_error", data)
+                    self.assertNotIn("revision", data)
+
+    def test_edit_validates_preview_options_before_mutating(self):
+        from inkler_mcp import tool_call
+        for extra in ({"width": 0}, {"observe": "false"}, {"ids": "cat"}, {"area": "bad"}):
+            with patch("inkler_client.request") as request_mock:
+                with self.assertRaises(ValueError):
+                    tool_call("inkler_edit", {"document": "doc", "revision": "r", "operations": [], **extra})
+                request_mock.assert_not_called()
+
+    def test_edit_without_observation_has_no_preimport_revision(self):
+        from inkler_mcp import tool_call
+        with patch("inkler_client.request", return_value={"document": "doc", "revision": "pre-import", "operations": 1, "note": "Applied"}), patch("inkler_client.preview") as preview_mock:
+            result = tool_call("inkler_edit", {"document": "doc", "revision": "r", "operations": [], "observe": False})
+        preview_mock.assert_not_called()
+        data = json.loads(result["content"][0]["text"])
+        self.assertTrue(data["edit_applied"])
+        self.assertNotIn("revision", data)
+
     def test_connect_tool_calls_local_pairing(self):
         from inkler_mcp import tool_call
         with patch("inkler_client.connect", return_value={"connected": True}) as connect_mock:
@@ -281,7 +340,7 @@ class MCPTests(unittest.TestCase):
         responses = [json.loads(l) for l in process.stdout.splitlines()]
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["result"]["serverInfo"]["name"], "inkler")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 5)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 6)
         self.assertTrue(responses[2]["result"]["isError"])
 
 
