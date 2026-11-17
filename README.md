@@ -43,11 +43,15 @@ the local session D-Bus. Opening Connect Agent creates a fresh code and disconne
 previous attachments. Codes are local document selectors, not a security boundary
 against other programs running as your OS account. They become stale when the
 document closes or Inkscape restarts. Creating a code requires an idle bridge.
+Pairing is opt-in: until you create a code, the CLI and MCP tools work without one,
+including edits. Once a code exists, drawing operations require connecting to it.
 
 Inkler's executable uses `/usr/bin/python3`, so activating a Conda environment does
 not replace the interpreter. The extension is executable with the same system
 Python shebang; installation does not change Inkscape's interpreter preferences.
 Other Linux distributions may have different library paths and need adaptation.
+Snap and Flatpak builds of Inkscape use separate paths and are not supported;
+`inkler install` refuses unless `/usr/bin/inkscape` and its inkex library exist.
 
 ## Optional MCP connection
 
@@ -64,8 +68,8 @@ Run Inkler as a local stdio MCP server. For clients accepting `mcpServers` JSON:
 }
 ```
 
-Use your actual checkout path. On the development machine that is
-`/home/derrick/Gits/inkler/inkler`. Start the agent in the same desktop login session
+Use your actual checkout path, or the installed copy at
+`~/.config/inkscape/extensions/inkler/inkler`. Start the agent in the same desktop login session
 as Inkscape. It needs access to the session bus and the shared private Inkler cache.
 A container, remote session or sandbox that blocks D-Bus cannot attach just because
 the executable is installed. The MCP client may need a restart after configuration.
@@ -77,8 +81,8 @@ shell access can use the CLI instead; it does not need MCP.
 If you created a connection code in the panel, the agent calls `inkler_connect`
 with that code before invoking drawing tools. No shell connection command is
 needed when using MCP. The current
-prototype shares one local attachment among clients in that account; concurrent
-operations are serialized.
+prototype shares one local attachment among clients in that account. Concurrent
+operations are serialized: a second client waits up to 30 seconds for the first.
 
 For Codex, register the installed server once from your normal desktop terminal:
 
@@ -108,6 +112,8 @@ Inspect first. The result includes a `document` token, a `revision`, selected ob
 IDs, and object attributes. Bboxes are `[x, y, width, height]` in **SVG user units**
 in document coordinates. They describe geometry, omit stroke, and may approximate
 text; the preview is the visual check. `--ids square dog` limits inspection output.
+Without `--ids`, attribute values over 4,096 characters (long path data, embedded
+images) are listed in `omitted_attrs` with their length; inspect those IDs to get them.
 
 Send a batch of at most 100 operations, together with the inspection tokens:
 

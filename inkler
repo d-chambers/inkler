@@ -20,11 +20,21 @@ def install(uninstall=False):
     if target.is_symlink():
         raise ValueError("Refusing a symlinked extension directory")
     manifest = target / "manifest.json"
+    if not uninstall and not (Path("/usr/bin/inkscape").is_file() and
+                              Path("/usr/share/inkscape/extensions/inkex").is_dir()):
+        raise ValueError("Inkler needs the distribution Inkscape package (/usr/bin/inkscape with inkex). "
+                         "Snap and Flatpak builds use separate paths and are not supported")
+    recorded = {}
     if target.exists():
         if not manifest.is_file():
             raise ValueError("Existing extension directory has no Inkler manifest; refusing to overwrite it")
         recorded = json.loads(manifest.read_text())
-        if not set(recorded) <= set(FILES) or set(p.name for p in target.iterdir()) - set(FILES) - {"manifest.json", "__pycache__"}:
+        # Names from an older release may no longer be in FILES; they must still be plain names.
+        if not isinstance(recorded, dict) or not all(
+                isinstance(n, str) and n == Path(n).name and n not in {"", ".", "..", "manifest.json"}
+                for n in recorded):
+            raise ValueError("Unreadable Inkler manifest; inspect it manually")
+        if set(p.name for p in target.iterdir()) - set(FILES) - set(recorded) - {"manifest.json", "__pycache__"}:
             raise ValueError("Unexpected files in Inkler extension directory; inspect it manually")
         for name in recorded:
             path = target / name
@@ -46,6 +56,9 @@ def install(uninstall=False):
         shutil.copyfile(source, target / name)
         (target / name).chmod(0o755 if name in {"inkler_effect.py", "inkler_pair.py", "inkler"} else 0o644)
         hashes[name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    # Remove verified files that this release no longer ships.
+    for name in set(recorded) - set(FILES):
+        (target / name).unlink()
     manifest.write_text(json.dumps(hashes, indent=2) + "\n")
     return {"installed": str(target), "restart_inkscape": True,
             "note": "Save your work and restart Inkscape once. No agent configuration was changed."}

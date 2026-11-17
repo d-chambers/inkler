@@ -13,12 +13,15 @@ from inkler_ipc import locked, private_dir, read_json, state_dir, write_json
 ACTION = "org.inkler.bridge.noprefs"
 BUS_NAME = "org.inkscape.Inkscape"
 APP_PATH = "/org/inkscape/Inkscape"
+# Covers a typical request (up to 20 s for delivery and result), so a second client
+# queues behind the first instead of failing. A stuck Inkscape still fails clearly.
+LOCK_WAIT = 30
 
 
 def pair(desktop=None):
     desktop = desktop or Desktop()
     state = private_dir(state_dir())
-    with locked(state / "client.lock"):
+    with locked(state / "client.lock", wait=LOCK_WAIT):
         if (state / "request.json").exists() or (state / "active.json").exists():
             raise ValueError("An operation is pending; finish it before creating a new connection")
         info = desktop.status()
@@ -32,9 +35,12 @@ def pair(desktop=None):
 def connect(code, desktop=None):
     desktop = desktop or Desktop()
     state = private_dir(state_dir())
-    with locked(state / "client.lock"):
-        expected = read_json(state / "connection.json")
-        if not isinstance(code, str) or not secrets.compare_digest(code.strip(), expected["code"]):
+    with locked(state / "client.lock", wait=LOCK_WAIT):
+        try:
+            expected = read_json(state / "connection.json")
+        except FileNotFoundError:
+            raise ValueError("No connection code exists. Use Extensions → Inkler → Connect Agent in Inkscape") from None
+        if not isinstance(code, str) or not secrets.compare_digest(code.strip().encode(), expected["code"].encode()):
             raise ValueError("Connection code does not match. Use Connect Agent in Inkscape")
         if desktop.status()["document"] != expected["document"]:
             raise ValueError("The paired document closed or Inkscape restarted. Create a new code")
@@ -43,8 +49,9 @@ def connect(code, desktop=None):
 
 
 def check_attachment(state, document):
-    # Raw CLI inspection remains useful for diagnostics. Once the user creates a
-    # pairing, all drawing operations require that the agent has connected to it.
+    # Pairing is opt-in: before any code exists, every operation (including edits)
+    # works unpaired. Codes select a document; they are not a security boundary.
+    # Once the user creates a code, all drawing operations require connecting to it.
     if (state / "connection.json").exists():
         if not (state / "agent.json").exists():
             raise ValueError("Connect first: inkler connect CODE (from Inkscape's Connect Agent panel)")
@@ -67,11 +74,11 @@ class Desktop:
             "GetNameOwner", GLib.Variant("(s)", (BUS_NAME,)), None,
             Gio.DBusCallFlags.NO_AUTO_START, 3000, None).unpack()[0]
 
-    def call(self, path, interface, method, signature=None, args=()):
+    def call(self, path, interface, method, signature=None, args=(), timeout_ms=5000):
         params = self.GLib.Variant(signature, args) if signature else None
         return self.connection.call_sync(
             self.owner, path, interface, method, params, None,
-            self.Gio.DBusCallFlags.NO_AUTO_START, 5000, None).unpack()
+            self.Gio.DBusCallFlags.NO_AUTO_START, timeout_ms, None).unpack()
 
     def children(self, path):
         xml = self.call(path, "org.freedesktop.DBus.Introspectable", "Introspect")[0]
@@ -89,8 +96,10 @@ class Desktop:
         return {"connected": True, "document": self.owner + documents[0],
                 "window": windows[0], "transport": "local session D-Bus", "auto_save": False}
 
-    def activate(self):
-        self.call(APP_PATH, "org.gtk.Actions", "Activate", "(sava{sv})", (ACTION, [], {}))
+    def activate(self, timeout=20):
+        # Inkscape replies only after the extension finishes, so allow the full request time.
+        self.call(APP_PATH, "org.gtk.Actions", "Activate", "(sava{sv})", (ACTION, [], {}),
+                  timeout_ms=max(1000, int(timeout * 1000)))
 
 
 def request(operation, *, document=None, revision=None, operations=None, ids=None,
@@ -102,7 +111,7 @@ def request(operation, *, document=None, revision=None, operations=None, ids=Non
         raise ValueError("ids must be a list of at most 1,500 object IDs")
     desktop = desktop or Desktop()
     state = private_dir(state_dir())
-    with locked(state / "client.lock"):
+    with locked(state / "client.lock", wait=LOCK_WAIT):
         status = desktop.status()
         check_attachment(state, status["document"])
         if operation == "edit" and (document != status["document"] or not revision):
@@ -116,11 +125,16 @@ def request(operation, *, document=None, revision=None, operations=None, ids=Non
         spec = {"request_id": request_id, "operation": operation, "revision": revision,
                 "operations": operations, "ids": ids, "owner": desktop.owner}
         write_json(state / "request.json", spec)
-        # A delivery timeout has an unknown outcome: retain the pending request,
-        # preventing a later action from consuming a different edit.
-        desktop.activate()
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        # A delivery error or timeout has an unknown outcome: Inkscape may still run
+        # the extension. Keep waiting for a result, and retain the pending request so a
+        # later action cannot consume a different edit.
+        delivery_error = None
+        try:
+            desktop.activate(timeout=timeout)
+        except Exception as exc:
+            delivery_error = exc
+        while True:
             if (job / "result.json").exists() and not (state / "active.json").exists():
                 result = read_json(job / "result.json")
                 if result.get("request_id") != request_id:
@@ -130,9 +144,13 @@ def request(operation, *, document=None, revision=None, operations=None, ids=Non
                 data = result["data"]
                 data["document"] = status["document"]
                 return data
+            if time.monotonic() >= deadline:
+                break
             time.sleep(0.03)
-        raise TimeoutError("Inkler request timed out; outcome is unknown. Check Inkscape before retrying. "
-                           "If a dialog is blocking it, dismiss it. Otherwise restart Inkscape and reset Inkler")
+        detail = f" D-Bus activation reported: {delivery_error}." if delivery_error else ""
+        raise TimeoutError("Inkler request timed out; outcome is unknown." + detail +
+                           " Check Inkscape before retrying. If a dialog is blocking it, dismiss it. "
+                           "Otherwise restart Inkscape and reset Inkler")
 
 
 def preview(*, width=1200, area="page", ids=None, desktop=None):
