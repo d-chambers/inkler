@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="640" height="360" viewBox="0 0 640 360" id="demo">
+  <rect id="background" width="640" height="360" fill="#fffaf1"/>
+  <text id="heading" x="35" y="45" font-family="sans-serif" font-size="24" fill="#243238">Inkler: a shared canvas</text>
+  <rect id="square" x="65" y="115" width="120" height="120" fill="#18282e"/>
+  <g id="dog" inkscape:label="Dog">
+    <ellipse id="dog-body" cx="440" cy="190" rx="75" ry="43" fill="#c88f55"/>
+    <path id="dog-legs" d="M395 205 V260 H415 V210 M465 210 V260 H485 V205" fill="#c88f55"/>
+    <path id="dog-tail" d="M375 175 Q335 155 350 130" fill="none" stroke="#c88f55" stroke-width="16" stroke-linecap="round"/>
+    <ellipse id="dog-head" cx="505" cy="155" rx="38" ry="35" fill="#d6a16a"/>
+    <ellipse id="dog-ear" cx="484" cy="151" rx="14" ry="31" fill="#82583d"/>
+    <ellipse id="dog-muzzle" cx="534" cy="168" rx="27" ry="17" fill="#d6a16a"/>
+    <circle id="dog-eye" cx="513" cy="146" r="4" fill="#18282e"/>
+    <circle id="dog-nose" cx="554" cy="164" r="6" fill="#18282e"/>
+  </g>
+  <text id="caption" x="35" y="320" font-family="sans-serif" font-size="17" fill="#46565d">Turn the square into a cat. Point an arrow at the dog.</text>
+</svg>

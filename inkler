@@ -1,0 +1,111 @@
+#!/usr/bin/python3
+"""Inkler: a small local bridge for an agent and your existing Inkscape canvas."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+
+from inkler_ipc import MAX_BYTES
+
+ROOT = Path(__file__).resolve().parent
+FILES = ("inkler.inx", "inkler_effect.py", "inkler_core.py", "inkler_ipc.py",
+         "inkler", "inkler_client.py", "inkler_mcp.py", "inkler_connect.py", "SKILL.md",
+         "inkler_connect.inx", "inkler_pair.py")
+
+
+def install(uninstall=False):
+    target = Path.home() / ".config/inkscape/extensions/inkler"
+    if target.is_symlink():
+        raise ValueError("Refusing a symlinked extension directory")
+    manifest = target / "manifest.json"
+    if target.exists():
+        if not manifest.is_file():
+            raise ValueError("Existing extension directory has no Inkler manifest; refusing to overwrite it")
+        recorded = json.loads(manifest.read_text())
+        if not set(recorded) <= set(FILES) or set(p.name for p in target.iterdir()) - set(FILES) - {"manifest.json", "__pycache__"}:
+            raise ValueError("Unexpected files in Inkler extension directory; inspect it manually")
+        for name in recorded:
+            path = target / name
+            if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != recorded[name]:
+                raise ValueError("Installed extension was modified; inspect it manually: " + name)
+        if uninstall:
+            for name in (*recorded, "manifest.json"):
+                (target / name).unlink()
+            # Leave bytecode or unexpected directories for manual inspection.
+            if not any(target.iterdir()):
+                target.rmdir()
+            return {"uninstalled": True, "restart_inkscape": True}
+    elif uninstall:
+        return {"uninstalled": False, "reason": "not installed"}
+    target.mkdir(parents=True, exist_ok=True)
+    hashes = {}
+    for name in FILES:
+        source = ROOT / name
+        shutil.copyfile(source, target / name)
+        (target / name).chmod(0o755 if name in {"inkler_effect.py", "inkler_pair.py", "inkler"} else 0o644)
+        hashes[name] = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest.write_text(json.dumps(hashes, indent=2) + "\n")
+    return {"installed": str(target), "restart_inkscape": True,
+            "note": "Save your work and restart Inkscape once. No agent configuration was changed."}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("status", "install", "uninstall", "mcp", "pair"):
+        sub.add_parser(name)
+    connect = sub.add_parser("connect", help="Attach this local agent to a code shown by Connect Agent")
+    connect.add_argument("code")
+    inspect = sub.add_parser("inspect", help="Read document, selection, geometry, and revision")
+    inspect.add_argument("--ids", nargs="*")
+    edit = sub.add_parser("edit", help="Read {document, revision, operations} JSON from a file or stdin")
+    edit.add_argument("file", nargs="?", default="-")
+    preview = sub.add_parser("preview", help="Render live document to a private PNG")
+    preview.add_argument("--width", type=int, default=1200)
+    preview.add_argument("--area", choices=("page", "drawing"), default="page")
+    reset = sub.add_parser("reset", help="Clear a stalled request only after verified Inkscape restart")
+    reset.add_argument("--after-restart", action="store_true", required=True)
+    args = parser.parse_args()
+    if args.command in {"install", "uninstall"}:
+        result = install(args.command == "uninstall")
+    elif args.command == "mcp":
+        from inkler_mcp import serve
+        serve()
+        return
+    else:
+        from inkler_client import Desktop, request, preview, reset_after_restart, pair, connect
+        if args.command == "status":
+            result = Desktop().status()
+        elif args.command == "pair":
+            result = pair()
+        elif args.command == "connect":
+            result = connect(args.code)
+        elif args.command == "inspect":
+            result = request("inspect", ids=args.ids)
+        elif args.command == "edit":
+            if args.file == "-":
+                raw = sys.stdin.buffer.read(MAX_BYTES + 1)
+            else:
+                with open(args.file, "rb") as stream:
+                    raw = stream.read(MAX_BYTES + 1)
+            if len(raw) > MAX_BYTES:
+                raise ValueError("Edit request exceeds 8 MiB")
+            spec = json.loads(raw)
+            if not isinstance(spec, dict) or set(spec) - {"document", "revision", "operations"}:
+                raise ValueError("Edit requires only document, revision, operations")
+            result = request("edit", **spec)
+        elif args.command == "preview":
+            result = preview(width=args.width, area=args.area)
+        else:
+            result = reset_after_restart()
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), file=sys.stderr)
+        sys.exit(1)
