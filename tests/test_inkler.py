@@ -244,6 +244,21 @@ class IPCTests(unittest.TestCase):
 
 
 class MCPTests(unittest.TestCase):
+    def test_panel_can_outlive_launcher_without_resource_warning(self):
+        import warnings
+        from inkler_pair import launch_panel
+        with tempfile.TemporaryDirectory() as temp:
+            script = Path(temp) / "panel.py"
+            script.write_text("import time; time.sleep(0.3)\n")
+            with warnings.catch_warnings(record=True) as emitted:
+                warnings.simplefilter("always", ResourceWarning)
+                pid = launch_panel(script)
+                try:
+                    self.assertEqual(os.waitpid(pid, os.WNOHANG), (0, 0))
+                    self.assertFalse([w for w in emitted if issubclass(w.category, ResourceWarning)])
+                finally:
+                    os.waitpid(pid, 0)
+
     def test_protocol(self):
         messages = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
