@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import os
@@ -7,17 +8,19 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, "/usr/share/inkscape/extensions")
 import inkex
 from lxml import etree
-from inkler_core import apply_edits, fragment, inspect, revision, SVG, SOD
+from inkler_core import apply_edits, fragment, inspect, revision, SVG, SOD, XML
 from inkler_ipc import locked, private_dir, read_json, write_json
 from inkler_client import request, pair, connect
 
 ROOT = Path(__file__).resolve().parents[1]
+INX_SCHEMA = "/usr/share/inkscape/extensions/inkex/tester/inkscape.extension.rng"
 FIXTURE = f'''<svg xmlns="{SVG}" xmlns:sodipodi="{SOD}" width="400" height="250" viewBox="0 0 400 250" id="canvas">
 <sodipodi:namedview id="view" zoom="1"/>
 <rect id="square" x="40" y="40" width="80" height="80" fill="black"/>
@@ -87,7 +90,11 @@ class CoreTests(unittest.TestCase):
                     '<path onclick="alert(1)"/>', '<use href="https://evil.invalid/x"/>',
                     '<path fill="url(file:///etc/passwd)"/>', '<style>@import "x";</style>',
                     '<!DOCTYPE x><path/>', '<path style="fill:url(\\68 ttp://evil.invalid)"/>',
-                    '<path xmlns="http://evil.invalid"/>']:
+                    '<path xmlns="http://evil.invalid"/>',
+                    '<path style="fill:url(#a);filter:url(file:///etc/passwd"/>',
+                    '<path fill="url (file:///etc/passwd)"/>',
+                    '<path id="p"/>stray text<path id="q"/>', '<g><path/>stray</g>', '<path>text</path>',
+                    '<text xml:space="bogus">x</text>', '<text xml:base="file:///">x</text>']:
             with self.subTest(svg=svg), self.assertRaises((ValueError, etree.XMLSyntaxError)):
                 fragment(svg)
 
@@ -97,13 +104,41 @@ class CoreTests(unittest.TestCase):
             with self.subTest(op=op), self.assertRaises(ValueError):
                 apply_edits(root, [op], revision(root))
 
+    def test_text_and_xml_space_allowed_where_valid(self):
+        nodes = fragment('<text id="t" xml:space="preserve">Big <tspan>dog</tspan> here</text>'
+                         '<title>Name</title>\n<path id="after-whitespace"/>')
+        self.assertEqual(len(nodes), 3)
+        self.assertEqual("".join(nodes[0].itertext()), "Big dog here")
+        root = drawing()
+        out = apply_edits(root, [{"op": "set", "id": "label", "attrs": {"xml:space": "preserve"}}], revision(root))
+        self.assertEqual(out.xpath('//*[@id="label"]')[0].get(f"{{{XML}}}space"), "preserve")
+
+    def test_set_null_removes_references(self):
+        root = inkex.load_svg(f'<svg xmlns="{SVG}" xmlns:xlink="http://www.w3.org/1999/xlink" id="r">'
+                              '<linearGradient id="g" xlink:href="#h"/><linearGradient id="h"/></svg>').getroot()
+        out = apply_edits(root, [{"op": "set", "id": "g", "attrs": {"xlink:href": None}}], revision(root))
+        self.assertIsNone(out.xpath('//*[@id="g"]')[0].get("{http://www.w3.org/1999/xlink}href"))
+
+    def test_inspect_omits_long_values_unless_requested(self):
+        long_d = "M0 0 " + "L1 1 " * 2000
+        root = inkex.load_svg(f'<svg xmlns="{SVG}" id="r"><path id="trace" d="{long_d}" fill="red"/></svg>').getroot()
+        row = next(x for x in inspect(root)["objects"] if x["id"] == "trace")
+        self.assertNotIn("d", row["attrs"])
+        self.assertEqual(row["omitted_attrs"], {"d": len(long_d)})
+        self.assertEqual(row["attrs"]["fill"], "red")
+        row = inspect(root, ids=["trace"])["objects"][0]
+        self.assertEqual(row["attrs"]["d"], long_d)
+        self.assertNotIn("omitted_attrs", row)
+
     def test_attribute_types(self):
         root = drawing()
         with self.assertRaises(ValueError):
             apply_edits(root, [{"op": "set", "id": "square", "attrs": {"fill": 1}}], revision(root))
 
+    @unittest.skipUnless(Path(INX_SCHEMA).is_file(),
+                         "This Inkscape package does not ship the INX schema (e.g. Ubuntu 24.04's 1.2.2)")
     def test_inx_schema(self):
-        schema = etree.RelaxNG(etree.parse('/usr/share/inkscape/extensions/inkex/tester/inkscape.extension.rng'))
+        schema = etree.RelaxNG(etree.parse(INX_SCHEMA))
         for name in ('inkler.inx', 'inkler_connect.inx'):
             self.assertTrue(schema.validate(etree.parse(str(ROOT / name))), str(schema.error_log))
 
@@ -140,12 +175,31 @@ class IPCTests(unittest.TestCase):
                 cwd=ROOT, capture_output=True)
             self.assertNotEqual(child.returncode, 0)
 
+    def test_lock_waits_for_other_holder(self):
+        path = self.state / "lock"
+        released = threading.Event()
+        def hold():
+            with locked(path):
+                released.wait(0.3)
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            time.sleep(0.05)
+            with self.assertRaisesRegex(ValueError, "in progress"):
+                with locked(path):
+                    pass
+            with locked(path, wait=5):
+                pass
+        finally:
+            released.set()
+            holder.join()
+
     def test_pending_request_not_overwritten(self):
         write_json(self.state / "request.json", {"request_id": "old"})
         class Fake:
             owner = ":1.2"
             def status(self): return {"document": "doc"}
-            def activate(self): raise AssertionError("Must not deliver")
+            def activate(self, timeout=None): raise AssertionError("Must not deliver")
         with self.assertRaisesRegex(ValueError, "pending"):
             request("inspect", desktop=Fake())
         self.assertEqual(read_json(self.state / "request.json"), {"request_id": "old"})
@@ -179,6 +233,16 @@ class IPCTests(unittest.TestCase):
         self.assertNotEqual(session["code"], new["code"])
         self.assertFalse((self.state / "agent.json").exists())
 
+    def test_connect_without_code_explains_next_step(self):
+        class Fake:
+            owner = ":1.100"
+            def status(self): return {"document": "doc-1"}
+        with self.assertRaisesRegex(ValueError, "Connect Agent"):
+            connect("INKLER-ABC", Fake())
+        pair(Fake())
+        with self.assertRaisesRegex(ValueError, "match"):
+            connect("INKLER-ÄBC", Fake())
+
     def test_copy_instructions_contain_skill_and_command(self):
         from inkler_connect import instructions
         text = instructions("INKLER-TEST", Path("/tmp/my inkler"))
@@ -210,7 +274,7 @@ class IPCTests(unittest.TestCase):
         class FakeDesktop:
             owner = ":1.100"
             def status(self): return {"document": "test-document"}
-            def activate(self):
+            def activate(self, timeout=None):
                 proc = subprocess.run(["/usr/bin/python3", str(ROOT / "inkler_effect.py")],
                                       input=FIXTURE.encode(), capture_output=True, timeout=10)
                 if proc.returncode:
@@ -220,11 +284,69 @@ class IPCTests(unittest.TestCase):
                          operations=[{"op": "remove", "id": "square"}], desktop=FakeDesktop())
         self.assertNotEqual(info["revision"], result["revision"])
 
+    def test_large_drawing_snapshot_and_inspection(self):
+        # Drawings with traced paths or embedded images exceed the 8 MiB message limit.
+        long_d = "M0 0 " + "L123.456 78.9 " * 700000
+        fixture = f'<svg xmlns="{SVG}" viewBox="0 0 10 10" id="r"><path id="trace" d="{long_d}"/></svg>'
+        self.assertGreater(len(fixture), 9 * 1024 * 1024)
+        request_id = "c" * 32
+        job = private_dir(self.state / ("job-" + request_id))
+        write_json(self.state / "request.json", {"request_id": request_id, "operation": "snapshot"})
+        proc = subprocess.run(["/usr/bin/python3", str(ROOT / "inkler_effect.py")],
+                              input=fixture.encode(), capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        result = read_json(job / "result.json")
+        self.assertTrue(result["ok"], result)
+        trace = next(x for x in result["data"]["objects"] if x["id"] == "trace")
+        self.assertEqual(trace["omitted_attrs"], {"d": len(long_d)})
+        self.assertGreater((job / "snapshot.svg").stat().st_size, 9 * 1024 * 1024)
+
+    def test_activation_error_keeps_unknown_outcome(self):
+        class FakeDesktop:
+            owner = ":1.100"
+            def status(self): return {"document": "test-document"}
+            def activate(self, timeout=None): raise RuntimeError("Timeout was reached")
+        with self.assertRaisesRegex(TimeoutError, "outcome is unknown.*Timeout was reached"):
+            request("inspect", desktop=FakeDesktop(), timeout=0.1)
+        self.assertTrue((self.state / "request.json").exists())
+
+    def test_activation_error_still_collects_result(self):
+        # Inkscape can run the extension even though the D-Bus reply timed out.
+        class FakeDesktop:
+            owner = ":1.100"
+            def status(self): return {"document": "test-document"}
+            def activate(self, timeout=None):
+                proc = subprocess.run(["/usr/bin/python3", str(ROOT / "inkler_effect.py")],
+                                      input=FIXTURE.encode(), capture_output=True, timeout=10)
+                assert proc.returncode == 0, proc.stderr
+                raise RuntimeError("Timeout was reached")
+        self.assertIn("revision", request("inspect", desktop=FakeDesktop()))
+
+    def test_install_upgrade_removes_retired_files(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = {**os.environ, "HOME": home}
+            run = lambda command: subprocess.run(["/usr/bin/python3", str(ROOT / "inkler"), command],
+                                                 env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(run("install").returncode, 0)
+            target = Path(home) / ".config/inkscape/extensions/inkler"
+            retired = target / "retired.py"
+            retired.write_text("old\n")
+            manifest = json.loads((target / "manifest.json").read_text())
+            manifest["retired.py"] = hashlib.sha256(b"old\n").hexdigest()
+            (target / "manifest.json").write_text(json.dumps(manifest))
+            upgrade = run("install")
+            self.assertEqual(upgrade.returncode, 0, upgrade.stderr)
+            self.assertFalse(retired.exists())
+            self.assertNotIn("retired.py", json.loads((target / "manifest.json").read_text()))
+            uninstall = run("uninstall")
+            self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
+            self.assertFalse(target.exists())
+
     def test_timeout_keeps_pending_request(self):
         class FakeDesktop:
             owner = ":1.100"
             def status(self): return {"document": "test-document"}
-            def activate(self): pass
+            def activate(self, timeout=None): pass
         with self.assertRaises(TimeoutError):
             request("inspect", desktop=FakeDesktop(), timeout=0)
         self.assertTrue((self.state / "request.json").exists())
@@ -325,6 +447,15 @@ class MCPTests(unittest.TestCase):
                     self.assertFalse([w for w in emitted if issubclass(w.category, ResourceWarning)])
                 finally:
                     os.waitpid(pid, 0)
+
+    def test_protocol_errors(self):
+        messages = [b"{not json\n", b'{"jsonrpc": "2.0", "id": 7, "method": "' + b"x" * (8 * 1024 * 1024) + b'"}\n',
+                    b'{"jsonrpc": "2.0", "id": 8, "method": "ping"}\n']
+        process = subprocess.run(["/usr/bin/python3", str(ROOT / "inkler"), "mcp"], input=b"".join(messages),
+                                 capture_output=True, timeout=30)
+        responses = [json.loads(l) for l in process.stdout.splitlines()]
+        self.assertEqual([r.get("error", {}).get("code") for r in responses], [-32700, -32600, None])
+        self.assertEqual(responses[2], {"jsonrpc": "2.0", "id": 8, "result": {}})
 
     def test_protocol(self):
         messages = [

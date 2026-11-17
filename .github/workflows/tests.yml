@@ -4,12 +4,32 @@ permissions:
   contents: read
 jobs:
   test:
+    name: test (Ubuntu ${{ matrix.ubuntu }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Inkler's target: Ubuntu 26.04's Inkscape 1.4.x, run in a container
+          # because no hosted 26.04 runner is assumed. Includes the INX schema test.
+          - ubuntu: "26.04"
+            container: ubuntu:26.04
+          # The runner's own Inkscape 1.2.2, the oldest release still exercised.
+          - ubuntu: "24.04"
+            container: ""
+    container: ${{ matrix.container || null }}
     steps:
       - uses: actions/checkout@v4
       - name: Install distro dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y inkscape python3-lxml python3-gi
+          # Containers run as root without sudo; the hosted runner needs sudo.
+          SUDO=$([ "$(id -u)" = 0 ] || echo sudo)
+          $SUDO apt-get update
+          # Recommends are kept: inkex needs python3-numpy and friends from them.
+          # gir1.2-gtk-3.0 provides the Gtk typelib the Connect Agent panel imports.
+          $SUDO apt-get install -y inkscape python3-lxml python3-gi gir1.2-gtk-3.0
+          inkscape --version
       - name: Run tests without PyPI dependencies
         run: /usr/bin/python3 -m unittest discover -s tests -v

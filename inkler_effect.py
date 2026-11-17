@@ -48,7 +48,8 @@ class InklerEffect(inkex.EffectExtension):
                         if original_dir:
                             snapshot.set("{http://www.w3.org/XML/1998/namespace}base",
                                          Path(original_dir).resolve().as_uri() + "/")
-                        atomic_write(job / "snapshot.svg", etree.tostring(snapshot))
+                        # A local render input, not an IPC message: drawings may exceed 8 MiB.
+                        atomic_write(job / "snapshot.svg", etree.tostring(snapshot), limit=None)
                         data["snapshot"] = str(job / "snapshot.svg")
                 else:
                     raise ValueError("Unknown Inkler operation")

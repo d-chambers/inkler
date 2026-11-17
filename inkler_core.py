@@ -8,10 +8,19 @@ SVG = "http://www.w3.org/2000/svg"
 INK = "http://www.inkscape.org/namespaces/inkscape"
 SOD = "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
 XLINK = "http://www.w3.org/1999/xlink"
+XML = "http://www.w3.org/XML/1998/namespace"
 NS = {"svg": SVG, "inkscape": INK, "sodipodi": SOD, "xlink": XLINK}
+# Prefixes accepted in `set` attribute names; xml is predeclared and never redeclared.
+PREFIXES = {**NS, "xml": XML}
 TAGS = frozenset("g defs path rect circle ellipse line polyline polygon text tspan textPath title desc linearGradient radialGradient stop marker clipPath mask pattern use".split())
 ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 URL = re.compile(r"url\(\s*(['\"]?)(.*?)\1\s*\)", re.I)
+URL_START = re.compile(r"url\s*\(", re.I)
+TEXT_CONTENT = frozenset({"text", "tspan", "textPath"})
+TEXT_HOLDERS = TEXT_CONTENT | {"title", "desc"}
+# Longer values (typically path data or embedded images) are omitted from unfiltered
+# inspections so a detailed drawing still fits in one result.
+LONG_VALUE = 4096
 
 
 def revision(root):
@@ -25,6 +34,11 @@ def revision(root):
 def safe_attribute(name, value):
     q = etree.QName(name)
     local = q.localname.lower()
+    if q.namespace == XML and q.localname == "space":
+        # Inkscape writes xml:space="preserve" on text; it is inert.
+        if value not in ("preserve", "default"):
+            raise ValueError("xml:space must be preserve or default")
+        return
     if q.namespace not in (None, INK, XLINK) or local.startswith("on"):
         raise ValueError("Unsupported or active attribute: " + name)
     if local in {"base", "src"}:
@@ -36,10 +50,13 @@ def safe_attribute(name, value):
     lowered = value.lower()
     if any(s in lowered for s in ("@import", "javascript:", "expression(", "\\", "/*", "*/")):
         raise ValueError("Active/obfuscated CSS is not supported")
-    for match in URL.finditer(value):
+    matches = list(URL.finditer(value))
+    for match in matches:
         if not re.fullmatch(r"#[A-Za-z_][A-Za-z0-9_.-]*", match[2]):
             raise ValueError("Only internal url(#id) references are supported")
-    if "url" in lowered and "(" in lowered and not URL.search(value):
+    # CSS accepts an unclosed url( at the end of a value, so every url( must be a
+    # complete, validated match.
+    if len(matches) != len(URL_START.findall(value)):
         raise ValueError("Malformed URL reference")
     if local == "id" and not ID.fullmatch(value):
         raise ValueError("Use a simple SVG id, e.g. cat-body")
@@ -65,7 +82,21 @@ def fragment(text):
             raise ValueError("Unsupported SVG element: " + q.localname)
         for key, val in node.attrib.items():
             safe_attribute(key, val)
+        if (node.text or "").strip() and q.localname not in TEXT_HOLDERS:
+            raise ValueError(f"Text is not supported inside <{q.localname}>")
+        if (node.tail or "").strip() and etree.QName(node.getparent()).localname not in TEXT_CONTENT:
+            raise ValueError("Supply SVG elements, with text inside <text> or <tspan>")
     return nodes
+
+
+def attribute_name(key):
+    # Prefixes in JSON attributes use familiar SVG namespace names.
+    if ":" in key and not key.startswith("{"):
+        prefix, local = key.split(":", 1)
+        if prefix not in PREFIXES:
+            raise ValueError("Unknown namespace prefix")
+        return f"{{{PREFIXES[prefix]}}}{local}"
+    return key
 
 
 def find(root, object_id):
@@ -117,15 +148,10 @@ def apply_edits(root, operations, expected_revision):
                 if not isinstance(attrs, dict) or not attrs:
                     raise ValueError("set requires a nonempty attrs object")
                 for key, val in attrs.items():
-                    # Prefixes in JSON attributes use familiar SVG namespace names.
-                    name = key
-                    if ":" in key and not key.startswith("{"):
-                        prefix, local = key.split(":", 1)
-                        if prefix not in NS:
-                            raise ValueError("Unknown namespace prefix")
-                        name = f"{{{NS[prefix]}}}{local}"
+                    name = attribute_name(key)
                     if val is None:
-                        safe_attribute(name, "")
+                        # Removal cannot introduce content, so only the name must parse.
+                        etree.QName(name)
                         target.attrib.pop(name, None)
                     else:
                         safe_attribute(name, val)
@@ -162,9 +188,18 @@ def inspect(root, selected=(), ids=None):
         if len(rows) >= 1500:
             truncated = True
             break
+        attrs, omitted = {}, {}
+        for key, value in node.attrib.items():
+            # Objects requested by ID always get full values, e.g. to edit path data.
+            if wanted is None and len(value) > LONG_VALUE:
+                omitted[key] = len(value)
+            else:
+                attrs[key] = value
         row = {"id": object_id, "tag": etree.QName(node).localname,
                "parent": node.getparent().get("id") if node.getparent() is not None else None,
-               "label": node.get(f"{{{INK}}}label"), "attrs": dict(node.attrib)}
+               "label": node.get(f"{{{INK}}}label"), "attrs": attrs}
+        if omitted:
+            row["omitted_attrs"] = omitted
         if row["tag"] in {"text", "tspan", "title", "desc"}:
             row["text"] = "".join(node.itertext())[:2000]
         # inkex geometry omits stroke and approximates text; rendered preview is authoritative.
@@ -181,4 +216,5 @@ def inspect(root, selected=(), ids=None):
             "selection": list(selected), "viewBox": root.get("viewBox"),
             "width": root.get("width"), "height": root.get("height"),
             "objects": rows, "truncated": truncated,
-            "coordinates": "SVG user units; bbox is [x,y,width,height] in document space, geometry only. Edits use parent coordinates; transforms are NOT copied on replace."}
+            "coordinates": "SVG user units; bbox is [x,y,width,height] in document space, geometry only. Edits use parent coordinates; transforms are NOT copied on replace.",
+            "omitted_attrs": "Without an ids filter, attribute values over 4,096 characters are listed in omitted_attrs by length; request those ids for full values."}
