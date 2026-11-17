@@ -20,6 +20,7 @@ from inkler_ipc import locked, private_dir, read_json, write_json
 from inkler_client import request, pair, connect
 
 ROOT = Path(__file__).resolve().parents[1]
+INX_SCHEMA = "/usr/share/inkscape/extensions/inkex/tester/inkscape.extension.rng"
 FIXTURE = f'''<svg xmlns="{SVG}" xmlns:sodipodi="{SOD}" width="400" height="250" viewBox="0 0 400 250" id="canvas">
 <sodipodi:namedview id="view" zoom="1"/>
 <rect id="square" x="40" y="40" width="80" height="80" fill="black"/>
@@ -134,8 +135,10 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_edits(root, [{"op": "set", "id": "square", "attrs": {"fill": 1}}], revision(root))
 
+    @unittest.skipUnless(Path(INX_SCHEMA).is_file(),
+                         "This Inkscape package does not ship the INX schema (e.g. Ubuntu 24.04's 1.2.2)")
     def test_inx_schema(self):
-        schema = etree.RelaxNG(etree.parse('/usr/share/inkscape/extensions/inkex/tester/inkscape.extension.rng'))
+        schema = etree.RelaxNG(etree.parse(INX_SCHEMA))
         for name in ('inkler.inx', 'inkler_connect.inx'):
             self.assertTrue(schema.validate(etree.parse(str(ROOT / name))), str(schema.error_log))
 
